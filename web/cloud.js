@@ -1,33 +1,27 @@
 /*
- * Cloud transport for the Echelon dashboard (GitHub Pages build).
+ * AWS transport for the hosted dashboard.
  *
- * The local build talks to app.py on the same origin. This shim keeps
- * static/app.js unchanged and supports two connection modes:
- *
- *   phone  - this browser owns the BLE link through Web Bluetooth (ble.js);
- *            AWS is only used to store finished workouts and read history.
- *   agent  - a machine near the bike runs aws_agent.py; every request goes to
- *            the AWS API and live updates come from polling.
- *
- * It also turns the asynchronous AWS commands into the synchronous responses
- * the dashboard expects (scan, connect, disconnect, workout start/stop).
+ * The local build talks to app.py on the same origin. The hosted build talks to
+ * API Gateway, where the BLE bridge (aws_agent.py) is the only thing connected
+ * to the bike. This shim:
+ *   - routes /api/* and /status style paths to the AWS API with x-api-token
+ *   - implements the WebSocket endpoint with polling
+ *   - turns the asynchronous AWS commands into the synchronous responses the
+ *     dashboard expects (scan, connect, disconnect, workout start/stop)
+ *   - wires the API URL/token fields into the shared settings dialog
  */
 (function () {
   'use strict';
 
-  const KEYS = { api: 'echelon.apiUrl', token: 'echelon.apiToken', mode: 'echelon.mode' };
-  const PENDING_KEY = 'echelon.pendingWorkouts';
-  const bleSupported = Boolean(window.EchelonBle && window.EchelonBle.supported);
+  const KEYS = { api: 'echelon.apiUrl', token: 'echelon.apiToken' };
   const config = window.ECHELON_CONFIG || {};
   const nativeFetch = window.fetch.bind(window);
   const NativeWebSocket = window.WebSocket;
   const settings = {
-    apiUrl: String(config.apiUrl || localStorage.getItem(KEYS.api) || '').replace(/\/+$/, ''),
+    apiUrl: String(localStorage.getItem(KEYS.api) || config.apiUrl || '').replace(/\/+$/, ''),
     token: localStorage.getItem(KEYS.token) || '',
-    mode: localStorage.getItem(KEYS.mode) || (bleSupported ? 'phone' : 'agent'),
   };
-  if (!bleSupported) settings.mode = 'agent';
-  const bike = settings.mode === 'phone' ? window.EchelonBle.create() : null;
+  let waiters = [];
 
   window.__ECHELON_CLOUD__ = true;
 
@@ -46,145 +40,71 @@
     return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   }
 
-  function readPending() {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(PENDING_KEY) || '[]');
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function writePending(list) {
-    try { localStorage.setItem(PENDING_KEY, JSON.stringify(list.slice(-50))); } catch { /* ignore */ }
-  }
-
   // --------------------------------------------------------------- settings
-  let gate = null;
-
-  function askForSettings(message) {
-    if (gate) return gate;
-    gate = new Promise((resolve) => {
-      const overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;'
-        + 'justify-content:center;padding:18px;background:rgba(15,17,21,0.55);';
-
-      const form = document.createElement('form');
-      form.style.cssText = 'width:100%;max-width:440px;display:grid;gap:14px;padding:24px;'
-        + 'border-radius:14px;background:var(--surface,#ffffff);color:var(--text,#12161d);'
-        + 'border:1px solid var(--line-strong,#cdd2da);font:14px/1.5 "Segoe UI",system-ui,sans-serif;';
-
-      const title = document.createElement('h2');
-      title.textContent = 'Echelon settings';
-      title.style.cssText = 'margin:0;font-size:18px;letter-spacing:0.01em;';
-
-      const note = document.createElement('p');
-      note.textContent = message;
-      note.style.cssText = 'margin:0;color:var(--muted,#5a6472);font-size:13px;';
-
-      const field = (labelText, input) => {
-        const wrap = document.createElement('label');
-        wrap.style.cssText = 'display:grid;gap:6px;font-size:12px;letter-spacing:0.06em;'
-          + 'text-transform:uppercase;color:var(--muted-2,#7b8494);';
-        wrap.append(document.createTextNode(labelText), input);
-        return wrap;
-      };
-
-      const inputStyle = 'padding:10px 12px;border-radius:8px;'
-        + 'border:1px solid var(--line-strong,#cdd2da);'
-        + 'background:var(--surface-2,#f5f6f8);color:var(--text,#12161d);'
-        + 'font:13px/1.4 ui-monospace,Consolas,monospace;text-transform:none;';
-
-      const modeSelect = document.createElement('select');
-      modeSelect.style.cssText = inputStyle;
-      const phoneOption = document.createElement('option');
-      phoneOption.value = 'phone';
-      phoneOption.textContent = 'This device (Bluetooth)';
-      const agentOption = document.createElement('option');
-      agentOption.value = 'agent';
-      agentOption.textContent = 'Remote agent (AWS)';
-      modeSelect.append(phoneOption, agentOption);
-      if (!bleSupported) {
-        phoneOption.disabled = true;
-        phoneOption.textContent = 'This device (not supported by this browser)';
-      }
-      modeSelect.value = settings.mode;
-
-      const apiInput = document.createElement('input');
-      apiInput.type = 'url';
-      apiInput.required = true;
-      apiInput.placeholder = 'https://abc123.execute-api.us-east-1.amazonaws.com';
-      apiInput.value = settings.apiUrl;
-      apiInput.style.cssText = inputStyle;
-
-      const tokenInput = document.createElement('input');
-      tokenInput.type = 'password';
-      tokenInput.required = true;
-      tokenInput.placeholder = 'x-api-token value';
-      tokenInput.autocomplete = 'off';
-      tokenInput.style.cssText = inputStyle;
-
-      const submit = document.createElement('button');
-      submit.type = 'submit';
-      submit.textContent = 'Save';
-      submit.style.cssText = 'padding:11px 16px;border-radius:9px;border:0;cursor:pointer;'
-        + 'background:var(--accent,#15803d);color:var(--accent-contrast,#ffffff);font-weight:700;font-size:14px;';
-
-      const hint = document.createElement('p');
-      hint.textContent = bleSupported
-        ? 'Bluetooth mode connects this browser to the bike. The API URL and token are only used for workout history. Values stay in this browser.'
-        : 'This browser has no Web Bluetooth (iPhone, Firefox). Use Chrome on Android for direct Bluetooth, or run the agent near the bike.';
-      hint.style.cssText = 'margin:0;color:var(--muted-2,#7b8494);font-size:11.5px;';
-
-      form.append(
-        title, note,
-        field('Connection mode', modeSelect),
-        field('API URL', apiInput),
-        field('API token', tokenInput),
-        submit, hint,
-      );
-      overlay.appendChild(form);
-
-      const finish = (ok) => {
-        overlay.remove();
-        gate = null;
-        resolve(ok);
-      };
-
-      form.addEventListener('submit', (event) => {
-        event.preventDefault();
-        const apiUrl = apiInput.value.trim().replace(/\/+$/, '');
-        const token = tokenInput.value.trim();
-        if (!/^https?:\/\//i.test(apiUrl) || !token) {
-          note.textContent = 'Enter the full https URL and the API token.';
-          return;
-        }
-        const modeChanged = modeSelect.value !== settings.mode;
-        settings.apiUrl = apiUrl;
-        settings.token = token;
-        settings.mode = modeSelect.value;
-        localStorage.setItem(KEYS.api, apiUrl);
-        localStorage.setItem(KEYS.token, token);
-        localStorage.setItem(KEYS.mode, settings.mode);
-        finish(true);
-        if (modeChanged) setTimeout(() => location.reload(), 50);
-      });
-
-      overlay.addEventListener('click', (event) => {
-        if (event.target === overlay && settings.apiUrl && settings.token) finish(false);
-      });
-
-      document.body.appendChild(overlay);
-      tokenInput.focus();
-    });
-    return gate;
+  function needsConfig() {
+    return !settings.apiUrl || !settings.token;
   }
 
-  function ensureConfig() {
-    if (settings.apiUrl && settings.token) return Promise.resolve(true);
-    return askForSettings(
-      'Enter the API Gateway URL and token from your CloudFormation deploy output.',
-    );
+  function setStatus(message) {
+    const status = document.getElementById('apiStatus');
+    if (status) status.textContent = message || '';
+  }
+
+  function fillFields() {
+    const group = document.getElementById('cloudSettings');
+    if (group) group.hidden = false;
+    const url = document.getElementById('apiUrlInput');
+    const token = document.getElementById('apiTokenInput');
+    if (url) url.value = settings.apiUrl;
+    if (token) token.value = settings.token;
+  }
+
+  function openForConfig(message) {
+    fillFields();
+    setStatus(message || '');
+    if (window.EchelonSettings) window.EchelonSettings.open('');
+  }
+
+  function waitForConfig() {
+    return new Promise((resolve) => { waiters.push(resolve); });
+  }
+
+  async function ensureConfig() {
+    if (!needsConfig()) return true;
+    openForConfig('Enter the API token for your Echelon service.');
+    return waitForConfig();
+  }
+
+  function saveSettings() {
+    const urlInput = document.getElementById('apiUrlInput');
+    const tokenInput = document.getElementById('apiTokenInput');
+    const apiUrl = String((urlInput && urlInput.value) || '').trim().replace(/\/+$/, '');
+    const token = String((tokenInput && tokenInput.value) || '').trim();
+    if (!/^https?:\/\//i.test(apiUrl)) {
+      setStatus('Enter the full https API URL.');
+      return;
+    }
+    if (!token) {
+      setStatus('Enter the API token from your CloudFormation deploy output.');
+      return;
+    }
+    settings.apiUrl = apiUrl;
+    settings.token = token;
+    localStorage.setItem(KEYS.api, apiUrl);
+    localStorage.setItem(KEYS.token, token);
+    setStatus('Saved.');
+    const pending = waiters;
+    waiters = [];
+    pending.forEach((resolve) => resolve(true));
+    window.dispatchEvent(new Event('echelon:configured'));
+  }
+
+  function forgetToken() {
+    settings.token = '';
+    localStorage.removeItem(KEYS.token);
+    const input = document.getElementById('apiTokenInput');
+    if (input) input.value = '';
+    setStatus('Token removed. Add it again to load ride history.');
   }
 
   // ------------------------------------------------------------------- http
@@ -197,7 +117,8 @@
 
     let response = await nativeFetch(settings.apiUrl + path, options);
     if (response.status === 401) {
-      const saved = await askForSettings('The API token was rejected. Enter the current token.');
+      openForConfig('The API token was rejected. Enter the current token.');
+      const saved = await waitForConfig();
       if (saved) {
         headers['x-api-token'] = settings.token;
         response = await nativeFetch(settings.apiUrl + path, options);
@@ -210,55 +131,6 @@
     return request(path).then((response) => (response.ok ? response.json() : null));
   }
 
-  // ------------------------------------------------- workout upload (phone)
-  async function uploadWorkout(workout) {
-    try {
-      const response = await request('/workouts', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(workout),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return true;
-    } catch (error) {
-      const pending = readPending().filter((item) => item.id !== workout.id);
-      pending.push(workout);
-      writePending(pending);
-      if (bike) bike.log(`Workout kept on this device; upload retried later (${error.message}).`, 'info');
-      return false;
-    }
-  }
-
-  async function flushPending() {
-    if (!bike || !settings.apiUrl || !settings.token) return;
-    const pending = readPending();
-    if (!pending.length) return;
-    const keep = [];
-    for (const workout of pending) {
-      try {
-        const response = await request('/workouts', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(workout),
-        });
-        if (!response.ok) {
-          keep.push(workout);
-          continue;
-        }
-        bike.log(`Uploaded saved workout from ${workout.started_at}.`);
-      } catch {
-        keep.push(workout);
-      }
-    }
-    writePending(keep);
-  }
-
-  if (bike) {
-    bike.onConnect = () => { flushPending(); };
-    bike.onWorkout = (workout) => { uploadWorkout(workout); };
-  }
-
-  // ---------------------------------------------------------------- routing
   function toApiPath(path) {
     const split = path.indexOf('?');
     const rawPath = split === -1 ? path : path.slice(0, split);
@@ -277,61 +149,7 @@
     return null;
   }
 
-  async function localScan() {
-    try {
-      return jsonResponse({ devices: await bike.scan() });
-    } catch (error) {
-      return jsonResponse({ error: error.message }, 500);
-    }
-  }
-
-  async function localConnect() {
-    try {
-      return jsonResponse(await bike.connect());
-    } catch (error) {
-      return jsonResponse({ error: error.message, status: bike.status() }, 502);
-    }
-  }
-
-  async function localDisconnect() {
-    try {
-      return jsonResponse(await bike.disconnect(false));
-    } catch (error) {
-      return jsonResponse({ error: error.message, status: bike.status() }, 500);
-    }
-  }
-
-  async function localWorkoutStop() {
-    const summary = bike.stopWorkout();
-    if (summary) await uploadWorkout(summary);
-    return jsonResponse({ ok: true, workout: summary });
-  }
-
-  // Must stay synchronous: a null return means "not handled here, use AWS".
-  function localBikeRoute(url, method) {
-    if (!bike) return null;
-    const rawPath = url.split('?')[0];
-
-    if (rawPath === '/status' && method === 'GET') return jsonResponse(bike.status());
-    if (rawPath === '/events' && method === 'GET') return jsonResponse(bike.events.slice().reverse());
-    if (rawPath === '/scan' && method === 'POST') return localScan();
-    if (rawPath === '/connect' && method === 'POST') return localConnect();
-    if (rawPath === '/disconnect' && method === 'POST') return localDisconnect();
-
-    if (rawPath === '/api/workout/active' && method === 'GET') {
-      const snapshot = bike.tracker.snapshot();
-      return jsonResponse({ active: Boolean(snapshot), workout: snapshot });
-    }
-    if (rawPath === '/api/workout/start' && method === 'POST') {
-      const summary = bike.startWorkout();
-      return jsonResponse({ ok: Boolean(summary), workout: summary });
-    }
-    if (rawPath === '/api/workout/stop' && method === 'POST') return localWorkoutStop();
-
-    return null;
-  }
-
-  // ------------------------------------------------------ agent round trips
+  // ------------------------------------------------------ command round trips
   async function runScan() {
     const before = await getJson('/scan-result');
     const created = await request('/scan', { method: 'POST' });
@@ -420,14 +238,10 @@
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     if (url.charAt(0) !== '/' || url.indexOf('//') === 0) return nativeFetch(input, init);
-    const method = String((init && init.method) || 'GET').toUpperCase();
-
-    const local = localBikeRoute(url, method);
-    if (local) return local;
-
     const target = toApiPath(url);
     if (!target) return nativeFetch(input, init);
 
+    const method = String((init && init.method) || 'GET').toUpperCase();
     if (method === 'POST' && url === '/scan') return runScan();
     if (method === 'POST' && url === '/connect') return runConnect(init);
     if (method === 'POST' && url === '/disconnect') return runDisconnect();
@@ -446,13 +260,10 @@
       this.lastTelemetry = null;
       this.seenEvents = [];
       this.activeId = undefined;
-      this.unsubscribe = null;
-      this.maintenance = null;
       setTimeout(() => {
         if (this.closed) return;
         this.emit('open');
-        if (bike) this.startLocal();
-        else this.loop();
+        this.loop();
       }, 0);
     }
 
@@ -475,32 +286,17 @@
       });
     }
 
-    send() { /* neither mode needs a client keepalive */ }
+    send() { /* polling needs no client keepalive */ }
 
     close() {
       if (this.closed) return;
       this.closed = true;
       clearTimeout(this.timer);
-      if (this.maintenance) clearInterval(this.maintenance);
-      if (this.unsubscribe) this.unsubscribe();
       this.emit('close');
     }
 
     push(payload) {
       this.emit('message', JSON.stringify(payload));
-    }
-
-    startLocal() {
-      this.unsubscribe = bike.subscribe((payload) => {
-        if (!this.closed) this.push(payload);
-      });
-      this.push({ type: 'status', status: bike.status() });
-      this.push({ type: 'telemetry', telemetry: bike.latest });
-      bike.events.slice(-50).forEach((event) => this.push({ type: 'event', event }));
-      flushPending();
-      this.maintenance = setInterval(() => {
-        if (settings.apiUrl && settings.token) flushPending();
-      }, 30000);
     }
 
     pollStatus() {
@@ -553,7 +349,7 @@
 
     async loop() {
       if (this.closed) return;
-      if (!settings.apiUrl || !settings.token) {
+      if (needsConfig()) {
         this.timer = setTimeout(() => this.loop(), 3000);
         return;
       }
@@ -577,61 +373,23 @@
 
   // ------------------------------------------------------------ dashboard bits
   document.addEventListener('DOMContentLoaded', () => {
-    const lock = document.getElementById('lockBtn');
-    if (lock) {
-      lock.hidden = false;
-      lock.textContent = 'Settings';
-      lock.setAttribute('href', '#');
-      lock.title = settings.mode === 'phone'
-        ? 'Connecting from this device over Bluetooth'
-        : 'Connecting through the remote agent';
-      lock.addEventListener('click', (event) => {
-        event.preventDefault();
-        askForSettings('Update the connection mode, API URL, or token.');
-      });
-    }
-
-    // Chrome only allows the device chooser during transient activation, so the
-    // agent's fetch('/scan') cannot open it. Prime it from the real click.
-    if (bike) {
-      const scanButton = document.getElementById('scanBtn');
-      if (scanButton) {
-        scanButton.addEventListener('click', () => { bike.primeDevice(); }, true);
-      }
-      // Closing the tab mid-ride would otherwise drop the workout: keep the
-      // partial session on the device and let the next visit upload it.
-      window.addEventListener('beforeunload', () => {
-        try {
-          if (bike.tracker.active) {
-            const summary = bike.tracker.stop();
-            if (summary) {
-              const pending = readPending().filter((item) => item.id !== summary.id);
-              pending.push(summary);
-              writePending(pending);
-            }
-          }
-        } catch (error) {
-          console.warn('Could not persist in-progress workout', error);
-        }
-        bike.disconnect(true);
-      });
-    }
+    fillFields();
+    document.getElementById('saveApiBtn')?.addEventListener('click', saveSettings);
+    document.getElementById('forgetTokenBtn')?.addEventListener('click', forgetToken);
 
     const hint = document.getElementById('dbHint');
     if (hint) hint.textContent = 'History: AWS DynamoDB';
     const foot = document.querySelector('.page-foot span:first-child');
-    if (foot) {
-      foot.textContent = settings.mode === 'phone'
-        ? 'Bluetooth from this device · history in your AWS account'
-        : 'Hosted dashboard · data in your AWS account';
+    if (foot) foot.textContent = 'Hosted dashboard · data in your AWS account';
+
+    if (needsConfig()) {
+      openForConfig('Enter the API token from your CloudFormation deploy output.');
     }
   });
 
-  // Prompt once at startup when the site has no configuration yet.
-  window.addEventListener('load', () => { ensureConfig(); });
-
   window.EchelonCloud = {
-    get mode() { return settings.mode; },
-    get bike() { return bike; },
+    saveSettings,
+    forgetToken,
+    get settings() { return { ...settings }; },
   };
 })();

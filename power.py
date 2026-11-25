@@ -9,8 +9,9 @@ friction:
     magnetic   = 0.0022 * e^(0.115 * resistance) * cadence^1.85
     drivetrain = 0.25 * cadence
 
-Keep this file and its browser port in ``web/ble.js`` in sync; the codec tests
-compare them.
+The value is computed by the process that owns the BLE link (the local app or
+``aws_agent.py``) and travels to the dashboard as ``power_watts``; the browser
+never recalculates it.
 """
 
 from __future__ import annotations

@@ -1,32 +1,24 @@
 # AWS service
 
-AWS compute has no Bluetooth radio, so the BLE link is always owned by
-something near the bike. The hosted dashboard supports two ways to provide it:
+AWS compute has no Bluetooth radio, so the machine next to the bike owns the
+BLE link and everything else lives in AWS:
 
 ```text
-                    phone (Chrome on Android) ── Bluetooth ──> Bike
-                               │
-                               │ HTTPS: upload finished workouts only
-                               ▼
-            GitHub Pages ──HTTPS──> API Gateway ──> Lambda ──> DynamoDB
-                 dashboard              ▲
-                                        │ HTTPS (agent polls commands,
-                                        │        pushes telemetry + workouts)
-                             aws_agent.py on the BLE-capable machine
-                                        │
-                                    Bluetooth
-                                        │
-                                      Bike
+     GitHub Pages ──HTTPS──> API Gateway ──> Lambda ──> DynamoDB
+       dashboard                 ▲
+                                 │ HTTPS (agent polls commands,
+                                 │        pushes telemetry + workouts)
+                    aws_agent.py on the BLE-capable machine
+                                 │
+                             Bluetooth
+                                 │
+                               Bike
 ```
-
-`phone` mode needs no agent: the page uses Web Bluetooth and posts the finished
-workout. `agent` mode keeps live telemetry flowing to AWS, so any device can
-watch the ride, and it is the only option on iPhone/iPad (Safari and every iOS
-browser lack Web Bluetooth).
 
 The web dashboard is a static site, so it can be hosted on GitHub Pages. The
 agent keeps a local SQLite copy of your rides, so a network outage never loses
-a workout.
+a workout, and it keeps live telemetry flowing to AWS so any device can watch
+the ride.
 
 ## What the stack creates
 
@@ -131,48 +123,30 @@ variables. On Linux/macOS, a systemd unit or `launchd` job works the same way.
 ## Host the dashboard on GitHub Pages
 
 The repository ships a workflow that builds the dashboard from the shared
-`static/` assets plus the browser transport (`web/ble.js`, `web/cloud.js`) and
-pushes the result to a `production` branch:
+`static/` assets plus the browser transport (`web/cloud.js`) and pushes the
+result to a `production` branch:
 
 1. Push the repository to GitHub (the workflow runs on pushes to `main` or
    `master`, or start it manually under **Actions → Publish dashboard to
    production branch → Run workflow**).
 2. In **Settings → Pages**, set **Source** to **Deploy from a branch**, choose
    the **`production`** branch and the **`/ (root)`** folder, then save.
-3. Open `https://YOUR_USER.github.io/YOUR_REPO/`, paste the API URL and token
-   into the connection dialog, and the dashboard is live.
+3. Open `https://YOUR_USER.github.io/YOUR_REPO/` and paste the API token into
+   the settings dialog.
 
 The workflow force-pushes a single commit containing only the built site, so the
 `production` branch always mirrors `web/dist` and never accumulates history.
 Rebuilds happen automatically; there is no Pages API or artifact step involved.
 
-The values are stored in the browser's `localStorage` under `echelon.apiUrl`,
-`echelon.apiToken`, and `echelon.mode`, along with the display preferences
-`echelon.units` (`mi` or `km`, default `mi`) and `echelon.theme` (`light` or
-`dark`, default `light`). Use **Settings** in the dashboard header to change the
-connection settings, or the mi/km and theme controls next to it for display.
-
-### Connection modes
-
-| Mode | Bluetooth owner | Works on | Live data in AWS |
-| --- | --- | --- | --- |
-| This device | The browser (Web Bluetooth) | Chrome/Edge on Android and desktop | No — only finished workouts are uploaded |
-| Remote agent | `aws_agent.py` near the bike | Any browser, including iPhone | Yes — status, telemetry, events |
-
-**This device** mode:
-
-- The dashboard asks the browser for the device (filter: name prefix `ECH` or the
-  QZ service UUID), then performs the QZ handshake itself: init frames, challenge
-  response, activation, and the 2-second `F0 A0` keepalive.
-- Rides are recorded in the page and uploaded to `POST /workouts` when they
-  finish. Failed uploads stay in `localStorage` and are retried on the next visit.
-- Closing the tab mid-ride saves the partial session locally and uploads it next
-  time.
-- Keep the page visible while riding — mobile browsers may suspend a
-  backgrounded tab and drop the BLE link.
-
-**Remote agent** mode is the original behavior: commands are queued in DynamoDB
-and the agent polls for them, so the dashboard works from any device.
+The API URL is baked into the build (default
+`https://z9ngz05zw0.execute-api.us-east-1.amazonaws.com`; override with
+`--api-url` or the `ECHELON_API_URL` repository variable). The token and display
+preferences are stored in the browser's `localStorage` under `echelon.apiToken`,
+`echelon.apiUrl`, `echelon.units` (`mi` or `km`, default `mi`), and
+`echelon.theme` (`light` or `dark`, default `light`). The **Settings** dialog
+opened from the gear in the header holds the bike connection controls (status,
+Scan, Connect/Disconnect), the connection log, the display preferences, and the
+API credentials.
 
 ### Local preview
 
@@ -182,9 +156,9 @@ python -m http.server 8080 --directory web/dist
 ```
 
 `web/build.py` copies `static/index.html`, `static/app.js`, and
-`static/styles.css`, adds `ble.js`/`cloud.js`, rewrites the asset paths with a
-content hash, and injects `config.js`. Pass `--api-url https://...` to prefill
-the API URL so visitors only need the token.
+`static/styles.css`, adds `cloud.js`, rewrites the asset paths with a content
+hash, and injects `config.js`. Pass `--api-url https://...` to change the API
+URL baked into the site.
 
 ## API
 

@@ -18,6 +18,8 @@
     active: null,
     livePoints: [],
     liveMetric: 'cadence',
+    rideSpeed: [],
+    rideStamp: null,
     trendMetric: 'minutes',
     trendDays: 30,
     trendHover: null,
@@ -38,6 +40,11 @@
     speed: { label: 'Speed', short: 'Avg speed', unit: 'mph', color: '#0e7490', minMax: 25 },
     resistance: { label: 'Resistance', short: 'Avg resistance', unit: 'level', color: '#8b93ff', minMax: 20 },
   };
+
+  // Power that fills the Ride gauge ring end to end.
+  const GAUGE_MAX_WATTS = 400;
+  // Recent speeds kept for the Ride sparkline.
+  const RIDE_SPEED_SAMPLES = 300;
 
   // ------------------------------------------------------------ units + theme
   function distanceFactor() {
@@ -86,11 +93,20 @@
 
   function applyTheme() {
     document.documentElement.dataset.theme = state.theme;
-    const button = $('#themeBtn');
-    if (!button) return;
-    const next = state.theme === 'light' ? 'dark' : 'light';
-    button.setAttribute('aria-label', `Switch to ${next} theme`);
-    button.textContent = state.theme === 'light' ? '◐' : '◑';
+    syncThemeControls();
+  }
+
+  function syncThemeControls() {
+    $$('#themeTabs button').forEach((button) => {
+      button.classList.toggle('is-active', button.dataset.theme === state.theme);
+    });
+  }
+
+  function setTheme(theme) {
+    state.theme = theme === 'dark' ? 'dark' : 'light';
+    localStorage.setItem(THEME_KEY, state.theme);
+    applyTheme();
+    redrawCharts();
   }
 
   function syncUnitControls() {
@@ -100,7 +116,7 @@
   }
 
   // ------------------------------------------------------------------ pages
-  const PAGE_HASHES = { '#live': 'live', '#trends': 'trends', '#history': 'workouts' };
+  const PAGE_HASHES = { '#live': 'live', '#ride': 'ride', '#trends': 'trends', '#history': 'workouts' };
 
   function currentPage() {
     return PAGE_HASHES[location.hash] || 'live';
@@ -116,11 +132,14 @@
       if (active) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
+    // A hidden canvas has no size, so the sparkline is drawn once it becomes visible.
+    if (page === 'ride') drawRideChart();
   }
 
   function redrawCharts() {
     drawLiveChart(true);
     drawTrendChart();
+    drawRideChart();
     if (state.detail) drawDetailChart();
   }
 
@@ -136,12 +155,26 @@
     redrawCharts();
   }
 
-  function toggleTheme() {
-    state.theme = state.theme === 'light' ? 'dark' : 'light';
-    localStorage.setItem(THEME_KEY, state.theme);
-    applyTheme();
-    redrawCharts();
+  function openSettings(message) {
+    const dialog = $('#settingsDialog');
+    if (!dialog) return;
+    const hint = $('#settingsHint');
+    if (hint && message) hint.textContent = message;
+    if (typeof dialog.showModal === 'function') {
+      if (!dialog.open) dialog.showModal();
+    } else {
+      dialog.setAttribute('open', '');
+    }
   }
+
+  function closeSettings() {
+    const dialog = $('#settingsDialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  window.EchelonSettings = { open: openSettings, close: closeSettings };
 
   // ---------------------------------------------------------------- utilities
   function clampGoal(value) {
@@ -652,7 +685,7 @@
 
     const connected = Boolean(status.connected);
     const lock = $('#lockBtn');
-    if (lock) lock.hidden = window.__ECHELON_CLOUD__ ? false : !status.auth_required;
+    if (lock) lock.hidden = !status.auth_required;
     $('#connectBtn').disabled = !$('#deviceSelect').value;
     $('#disconnectBtn').disabled = !connected;
     $('#workoutBtn').disabled = !connected && !state.active;
@@ -688,8 +721,9 @@
   }
 
   function renderLive(telemetry) {
+    if (telemetry) state.telemetry = telemetry;
+    renderRide();
     if (!telemetry) return;
-    state.telemetry = telemetry;
     const cadence = telemetry.cadence_rpm;
     const resistance = telemetry.resistance;
     const speed = telemetry.speed_kph_estimate;
@@ -730,6 +764,88 @@
     }
   }
 
+  // Metric-only ride screen: timer, power gauge, the remaining numbers, and a speed sparkline.
+  function renderRide() {
+    const telemetry = state.telemetry;
+    const active = state.active || state.status?.workout || null;
+    const live = (value) => value === null || value === undefined || Number.isNaN(Number(value));
+
+    const elapsed = active ? Number(active.duration_seconds) || 0 : telemetry?.elapsed_seconds;
+    const power = telemetry?.power_watts;
+    const cadence = telemetry?.cadence_rpm;
+    const resistance = telemetry?.resistance;
+    const speed = telemetry?.speed_kph_estimate;
+    const distance = active ? active.distance_km : telemetry?.distance_km;
+
+    $('#rideClock').textContent = live(elapsed) ? '0:00' : fmtDuration(elapsed);
+    $('#ridePower').textContent = live(power) ? '—' : fmtNumber(power, 0);
+    $('#rideCadence').textContent = live(cadence) ? '—' : fmtNumber(cadence, 0);
+    $('#rideResistance').textContent = live(resistance) ? '—' : fmtNumber(resistance, 0);
+    $('#rideSpeed').textContent = live(speed) ? '—' : fmtNumber(convertSpeed(speed), 1);
+    $('#rideDistance').textContent = live(distance) ? '—' : fmtNumber(convertDistance(distance), 2);
+    $('#rideSpeedUnit').textContent = speedUnit();
+    $('#rideDistanceUnit').textContent = distanceUnit();
+
+    rememberRideSpeed(telemetry);
+
+    const ring = $('#rideGauge');
+    if (ring) {
+      const circumference = 2 * Math.PI * ring.r.baseVal.value;
+      const ratio = Math.min(1, Math.max(0, (live(power) ? 0 : Number(power)) / GAUGE_MAX_WATTS));
+      ring.style.strokeDasharray = String(circumference);
+      ring.style.strokeDashoffset = String(circumference * (1 - ratio));
+    }
+
+    drawRideChart();
+  }
+
+  // Rolling speed buffer for the Ride sparkline, independent of workout recording.
+  function rememberRideSpeed(telemetry) {
+    const stamp = telemetry?.timestamp;
+    if (!stamp || stamp === state.rideStamp) return;
+    state.rideStamp = stamp;
+    const speed = Number(telemetry.speed_kph_estimate);
+    if (!Number.isFinite(speed)) return;
+    state.rideSpeed.push(speed);
+    const excess = state.rideSpeed.length - RIDE_SPEED_SAMPLES;
+    if (excess > 0) state.rideSpeed.splice(0, excess);
+  }
+
+  function drawRideChart() {
+    const canvas = $('#rideChart');
+    if (!canvas || !canvas.offsetParent) return;
+    const { ctx, width, height } = setupCanvas(canvas);
+    const color = chartColor('speed');
+
+    const values = state.rideSpeed
+      .map((speed) => convertSpeed(speed))
+      .filter((speed) => Number.isFinite(speed));
+    if (values.length < 2) return;
+
+    const top = 10;
+    const bottom = Math.max(top + 1, height - 10);
+    const hi = Math.max(...values);
+    const lo = Math.min(...values);
+    const flat = hi - lo < 0.1;
+    const span = flat ? 1 : hi - lo;
+    const yFor = (value) => (flat ? (top + bottom) / 2 : bottom - ((value - lo) / span) * (bottom - top));
+    const stepX = width / (values.length - 1);
+    const xFor = (index) => index * stepX;
+
+    ctx.beginPath();
+    values.forEach((value, index) => {
+      const x = xFor(index);
+      const y = yFor(value);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+
   function renderLiveFooter() {
     const points = state.livePoints;
     const metric = state.liveMetric;
@@ -768,6 +884,12 @@
     $('#goalPercent').textContent = `${percent}%`;
     $('#goalText').textContent = `${fmtNumber(minutes, 0)} of ${goal} minutes today`;
     $('#goalInput').value = String(goal);
+
+    const rideGoal = $('#rideGoal');
+    if (rideGoal) {
+      rideGoal.style.width = `${percent}%`;
+      $('#rideGoalBar').setAttribute('aria-valuenow', String(percent));
+    }
 
     $('#todayDate').textContent = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
     $('#todayMinutes').textContent = fmtNumber(minutes, 0);
@@ -1167,6 +1289,7 @@
           });
           showToast(`Found ${data.devices.length} device${data.devices.length === 1 ? '' : 's'}`);
         }
+        select.dispatchEvent(new Event('change'));
         renderStatus(state.status);
       } catch (error) {
         showToast(error.message, 'error');
@@ -1273,8 +1396,25 @@
     $$('#unitTabs button').forEach((button) => {
       button.addEventListener('click', () => setUnits(button.dataset.unit));
     });
-    const themeButton = $('#themeBtn');
-    if (themeButton) themeButton.addEventListener('click', toggleTheme);
+    $$('#themeTabs button').forEach((button) => {
+      button.addEventListener('click', () => setTheme(button.dataset.theme));
+    });
+
+    const settingsButton = $('#settingsBtn');
+    if (settingsButton) settingsButton.addEventListener('click', () => openSettings(''));
+    const settingsDialog = $('#settingsDialog');
+    if (settingsDialog) {
+      const close = () => closeSettings();
+      $('#settingsClose')?.addEventListener('click', close);
+      $('#settingsDone')?.addEventListener('click', close);
+      settingsDialog.addEventListener('click', (event) => {
+        if (event.target === settingsDialog) close();
+      });
+    }
+
+    window.addEventListener('echelon:configured', () => {
+      refreshHistory();
+    });
 
     window.addEventListener('hashchange', () => {
       applyPage();
@@ -1335,9 +1475,10 @@
         if (canvas.id === 'liveChart') drawLiveChart(true);
         else if (canvas.id === 'trendChart') drawTrendChart();
         else if (canvas.id === 'detailChart') drawDetailChart();
+        else if (canvas.id === 'rideChart') drawRideChart();
       });
     });
-    ['#liveChart', '#trendChart', '#detailChart'].forEach((selector) => {
+    ['#liveChart', '#trendChart', '#detailChart', '#rideChart'].forEach((selector) => {
       const canvas = $(selector);
       if (canvas) observer.observe(canvas);
     });

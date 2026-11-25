@@ -59,12 +59,13 @@ Open http://127.0.0.1:8000.
 ## Use
 
 1. Power the bike on.
-2. Open the dashboard and click **Scan**.
-3. Select the device whose name matches your bike, normally beginning with `ECH`.
-4. Click **Connect**.
-5. Review the event log. If the 0xF0 0xE0 challenge is seen, the client attempts the
-   QZ direct response and sends the activation command 500 ms later.
-6. A connection is not considered successful merely because BLE connects. Wait for valid
+2. Open the dashboard and click the **gear icon** to open Settings.
+3. In the **Bike** section, click **Scan**.
+4. Select the device whose name matches your bike, normally beginning with `ECH`.
+5. Click **Connect**.
+6. Review the connection log in Settings. If the 0xF0 0xE0 challenge is seen, the client
+   attempts the QZ direct response and sends the activation command 500 ms later.
+7. A connection is not considered successful merely because BLE connects. Wait for valid
    post-unlock packets and compare displayed cadence/resistance/distance with the bike.
 
 The client also sends QZ's `F0 A0` poll every 2 seconds, which keeps the bike from dropping
@@ -153,24 +154,37 @@ Other details:
 
 ## Dashboard and workout history
 
-The browser dashboard has three views:
+The browser dashboard has four views:
 
-- **Live** — cadence, resistance, estimated speed, distance, elapsed time, estimated power,
-  and a live session chart you can switch between cadence, speed, and resistance.
-- **Trends** — minutes, distance, or average cadence per day over 7/14/30/90 days, plus
-  weekly totals, current streak, all-time distance, and best ride.
+- **Live** — just the live metrics (cadence, resistance, estimated speed, distance, elapsed
+  time, estimated power) and the session chart. The tracking badge and Start/Stop workout
+  button sit in the metrics card header.
+- **Ride** — a metrics-only screen for the bike: elapsed timer, a power gauge that fills from
+  0 to 400 W, cadence, resistance, speed, and distance below it, and a small live speed
+  chart at the bottom (rolling window of recent samples). It replaces the rest of the
+  dashboard while open, so nothing but numbers is on screen.
+- **Trends** — the daily goal ring and today's totals, then minutes, distance, or average
+  cadence per day over 7/14/30/90 days, plus weekly totals, current streak, all-time
+  distance, and best ride.
 - **Workouts** — every saved session with duration, distance, cadence, resistance, and a
   per-workout chart. Rows can be deleted, and all summaries export to CSV.
+
+Bike connection controls and the BLE connection log live in **Settings** (gear icon), next
+to the display preferences and, in the hosted build, the API credentials.
 
 A daily minutes goal (stored in the browser) drives the progress ring. The goal is a
 display preference only; it is not written to the database.
 
-### Display settings
+### Settings
 
-Two controls in the header are stored in the browser:
+Open **Settings** (gear icon in the header) to change, per browser:
 
-- **mi / km** — distance and speed units. Miles and mph are the default.
+- **Bike** — connection status, Scan, device picker, Connect/Disconnect, and the BLE
+  connection log.
+- **Distance units** — Miles (default, with mph) or Kilometres.
 - **Theme** — white (default) or dark. Both are flat, gradient-free themes.
+
+The same dialog holds the API URL and token when the hosted build needs them.
 
 On phones the three views become separate pages navigated from a floating,
 glass-style bar at the bottom. Live, Trends, and Workouts each deep-link by hash
@@ -248,23 +262,15 @@ line up with the more generous official Echelon Fit app readings. The browser bu
 its own port of the same formula, and the test suite asserts both produce identical values.
 Treat the number as comparative effort, not as a calibrated power meter.
 
-## Run on AWS (hosted dashboard, phone or agent for Bluetooth)
+## Run on AWS (hosted dashboard + BLE agent)
 
-AWS compute does not provide a Bluetooth radio, so something near the bike must hold the
-BLE link. The hosted dashboard supports both possibilities:
-
-- **This device (Bluetooth)** — the browser connects straight to the bike with Web
-  Bluetooth. Use Chrome on Android or desktop Chrome/Edge; iPhone, iPad and Firefox have no
-  Web Bluetooth, so they cannot use this mode. No agent process is needed.
-- **Remote agent (AWS)** — `aws_agent.py` runs on a computer near the bike and bridges BLE
-  to the API. Use this on iPhone or when the PC stays next to the bike.
-
-In both modes AWS stores workout history, so the dashboard shows the same journal from any
-device:
+AWS compute does not provide a Bluetooth radio, so the machine near the bike holds the
+BLE link while everything else lives in AWS:
 
 - **AWS** — API Gateway + Lambda + DynamoDB keep workout history, live state, and commands.
 - **GitHub Pages** — the dashboard, served statically, talks to that API.
-- **Phone or agent** — owns the BLE adapter and uploads finished workouts.
+- **`aws_agent.py`** — runs on the machine with the Bluetooth adapter, drives the bike,
+  and records every ride locally before uploading it.
 
 Deploy the service:
 
@@ -279,11 +285,12 @@ aws cloudformation deploy --template-file cloudformation/echelon-aws.yaml `
 Host the dashboard by pushing this repository to GitHub. The **Publish dashboard to
 production branch** workflow builds the site and force-pushes it to a `production`
 branch; set **Settings → Pages → Source** to **Deploy from a branch**, choose
-**`production`** and **`/ (root)`**, then open `https://YOUR_USER.github.io/YOUR_REPO/`. Paste
-the API URL and token into the connection dialog once; they stay in that browser. Open
-**Settings** at any time to switch between the two Bluetooth modes.
+**`production`** and **`/ (root)`**, then open `https://YOUR_USER.github.io/YOUR_REPO/`.
 
-For remote-agent mode, run the agent on the machine with Bluetooth:
+The API URL is baked into the build. On first open the settings dialog asks for the API
+token; paste it once and it stays in that browser.
+
+Run the agent on the machine with Bluetooth:
 
 ```powershell
 $env:ECHELON_API_URL = "https://YOUR_API_ID.execute-api.REGION.amazonaws.com"
@@ -291,15 +298,9 @@ $env:ECHELON_API_TOKEN = "the-token-from-the-deploy-step"
 python aws_agent.py
 ```
 
-Notes for phone mode:
-
-- The bike connects to the phone directly; the phone must be within Bluetooth range.
-- Workouts are recorded in the browser and uploaded when finished. If the upload fails,
-  the ride is kept in the browser and retried on the next visit.
-- A tab closed mid-ride keeps the partial session and uploads it next time.
-- Live data is not streamed to AWS in this mode, so another device cannot watch the ride
-  in real time. Use the remote agent if you want that.
-- Keep the dashboard open while riding; backgrounded mobile tabs can be suspended.
+The agent keeps a local SQLite copy of every ride, so a network outage never loses a
+workout. It also holds the only BLE connection: the dashboard queues scan/connect/workout
+commands in DynamoDB and the agent executes them about a second later.
 
 See `cloudformation/README.md` for the full deploy steps, API reference, CORS lockdown,
 and data model.

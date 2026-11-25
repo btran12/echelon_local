@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
 WEB = Path(__file__).resolve().parent
 DEFAULT_OUT = WEB / "dist"
+DEFAULT_API_URL = "https://z9ngz05zw0.execute-api.us-east-1.amazonaws.com"
 
 STYLES_LINK = '<link rel="stylesheet" href="/static/styles.css">'
 APP_SCRIPT = '<script src="/static/app.js"></script>'
@@ -32,24 +33,25 @@ def build(out: Path, api_url: str) -> None:
     index = index.replace(
         APP_SCRIPT,
         '<script src="config.js"></script>\n'
-        '<script src="ble.js"></script>\n'
         '<script src="cloud.js"></script>\n'
         '<script src="app.js"></script>',
     )
 
     out.mkdir(parents=True, exist_ok=True)
+    # Drop assets from earlier builds that are no longer produced.
+    for stale in ("ble.js", "login.html", "frame.html"):
+        (out / stale).unlink(missing_ok=True)
     for name in ("styles.css", "app.js"):
         shutil.copyfile(STATIC / name, out / name)
-    for name in ("ble.js", "cloud.js"):
-        shutil.copyfile(WEB / name, out / name)
+    shutil.copyfile(WEB / "cloud.js", out / "cloud.js")
 
     # GitHub Pages caches assets for a few minutes; version the URLs so a
     # deploy never pairs a new index.html with an old script.
     version = hashlib.sha256(
         (out / "app.js").read_bytes() + (out / "cloud.js").read_bytes()
-        + (out / "ble.js").read_bytes() + (out / "styles.css").read_bytes()
+        + (out / "styles.css").read_bytes()
     ).hexdigest()[:10]
-    for name in ("styles.css", "app.js", "ble.js", "cloud.js"):
+    for name in ("styles.css", "app.js", "cloud.js"):
         index = index.replace(f'"{name}"', f'"{name}?v={version}"')
     (out / "index.html").write_text(index, encoding="utf-8")
 
@@ -64,10 +66,15 @@ def build(out: Path, api_url: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-url", default="", help="Default API Gateway URL for the site")
+    parser.add_argument(
+        "--api-url",
+        default=DEFAULT_API_URL,
+        help="API Gateway URL baked into the site (defaults to the deployed stack)",
+    )
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory")
     args = parser.parse_args()
-    build(Path(args.out), args.api_url.strip())
+    api_url = (args.api_url or "").strip() or DEFAULT_API_URL
+    build(Path(args.out), api_url)
 
 
 if __name__ == "__main__":
