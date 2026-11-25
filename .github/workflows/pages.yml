@@ -1,26 +1,22 @@
-name: Deploy dashboard to GitHub Pages
+name: Publish dashboard to production branch
 
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
 
+# Only repository contents need write access: this workflow commits the built
+# site to a separate branch instead of deploying through the Pages API.
 permissions:
-  contents: read
-  actions: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
-  group: pages
+  group: publish-production
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  publish:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,13 +42,17 @@ jobs:
           test -f web/dist/app.js
           ls -la web/dist
 
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: web/dist
-
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      # Replaces the production branch with the freshly built site, so Pages can
+      # serve it with Source = "Deploy from a branch" → production → / (root).
+      - name: Publish to production branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd web/dist
+          git init -q
+          git checkout -q -b production
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "Publish ${GITHUB_SHA:0:7} from ${GITHUB_REF_NAME}" --allow-empty
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" production

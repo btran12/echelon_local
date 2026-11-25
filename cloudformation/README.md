@@ -131,14 +131,20 @@ variables. On Linux/macOS, a systemd unit or `launchd` job works the same way.
 ## Host the dashboard on GitHub Pages
 
 The repository ships a workflow that builds the dashboard from the shared
-`static/` assets plus the browser transport (`web/ble.js`, `web/cloud.js`):
+`static/` assets plus the browser transport (`web/ble.js`, `web/cloud.js`) and
+pushes the result to a `production` branch:
 
-1. Push the repository to GitHub.
-2. In **Settings → Pages**, set **Source** to **GitHub Actions**.
-3. Run the `Deploy dashboard to GitHub Pages` workflow (it also runs on pushes
-   to `main`).
-4. Open `https://YOUR_USER.github.io/YOUR_REPO/`, paste the API URL and token
+1. Push the repository to GitHub (the workflow runs on pushes to `main` or
+   `master`, or start it manually under **Actions → Publish dashboard to
+   production branch → Run workflow**).
+2. In **Settings → Pages**, set **Source** to **Deploy from a branch**, choose
+   the **`production`** branch and the **`/ (root)`** folder, then save.
+3. Open `https://YOUR_USER.github.io/YOUR_REPO/`, paste the API URL and token
    into the connection dialog, and the dashboard is live.
+
+The workflow force-pushes a single commit containing only the built site, so the
+`production` branch always mirrors `web/dist` and never accumulates history.
+Rebuilds happen automatically; there is no Pages API or artifact step involved.
 
 The values are stored in the browser's `localStorage` under `echelon.apiUrl`,
 `echelon.apiToken`, and `echelon.mode`, along with the display preferences

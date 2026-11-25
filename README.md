@@ -276,8 +276,10 @@ aws cloudformation deploy --template-file cloudformation/echelon-aws.yaml `
   --capabilities CAPABILITY_IAM --region us-east-1
 ```
 
-Host the dashboard by pushing this repository to GitHub, setting **Settings → Pages →
-Source** to **GitHub Actions**, and opening `https://YOUR_USER.github.io/YOUR_REPO/`. Paste
+Host the dashboard by pushing this repository to GitHub. The **Publish dashboard to
+production branch** workflow builds the site and force-pushes it to a `production`
+branch; set **Settings → Pages → Source** to **Deploy from a branch**, choose
+**`production`** and **`/ (root)`**, then open `https://YOUR_USER.github.io/YOUR_REPO/`. Paste
 the API URL and token into the connection dialog once; they stay in that browser. Open
 **Settings** at any time to switch between the two Bluetooth modes.
 
