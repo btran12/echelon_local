@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+data/
+*.db
+
+# Generated GitHub Pages bundle
+web/dist/
+
+# Windows shell artifacts
+nul
