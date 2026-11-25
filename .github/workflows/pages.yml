@@ -2,11 +2,12 @@ name: Deploy dashboard to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -28,9 +29,26 @@ jobs:
           python-version: "3.12"
 
       - name: Build static dashboard
-        run: python web/build.py
+        env:
+          # Optional repo variable (Settings → Secrets and variables → Actions → Variables).
+          # When set, visitors only need to paste the API token.
+          ECHELON_API_URL: ${{ vars.ECHELON_API_URL }}
+        run: |
+          if [ -n "$ECHELON_API_URL" ]; then
+            python web/build.py --api-url "$ECHELON_API_URL"
+          else
+            python web/build.py
+          fi
+
+      - name: Verify build output
+        run: |
+          test -f web/dist/index.html
+          test -f web/dist/app.js
+          ls -la web/dist
 
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
