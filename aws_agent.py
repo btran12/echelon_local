@@ -37,6 +37,10 @@ SYNC_INTERVAL_SECONDS = 30.0
 ACTIVE_SNAPSHOT_SECONDS = 10.0
 ACTIVE_SAMPLE_LIMIT = 600
 
+# Actions where only the newest queued command matters; an older one is stale
+# by the time the agent gets to it (e.g. a burst of dashboard Scan clicks).
+ONE_SHOT_ACTIONS = {"scan", "connect", "disconnect", "workout_start", "workout_stop"}
+
 
 def aws_workout_id(workout: dict[str, Any]) -> str:
     """Stable, sortable id shared with the AWS copy of a local workout."""
@@ -159,12 +163,32 @@ class AwsAgent:
 
     async def _poll_commands(self) -> None:
         data = await self._request("GET", "/commands")
-        for command in (data or {}).get("commands", []):
-            command_id = command.get("command_id")
-            if not command_id or command_id in self.seen_commands:
-                continue
+        commands = [
+            command
+            for command in (data or {}).get("commands", [])
+            if command.get("command_id") and command["command_id"] not in self.seen_commands
+        ]
+        newest: dict[str, dict[str, Any]] = {}
+        for command in commands:
+            if command.get("action") in ONE_SHOT_ACTIONS:
+                newest[command["action"]] = command
+        for command in commands:
+            command_id = command["command_id"]
+            action = command.get("action")
             self.seen_commands.add(command_id)
+            if action in ONE_SHOT_ACTIONS and newest.get(action) is not command:
+                asyncio.create_task(self._ack_skipped(command_id))
+                continue
             asyncio.create_task(self._execute(command))
+
+    async def _ack_skipped(self, command_id: str) -> None:
+        try:
+            await self._request(
+                "POST", f"/commands/{command_id}/ack", {"ok": True, "skipped": "superseded"}
+            )
+        except Exception as exc:
+            self.seen_commands.discard(command_id)
+            log.warning("Could not acknowledge command %s: %s", command_id, exc)
 
     async def _execute(self, command: dict[str, Any]) -> None:
         command_id = command["command_id"]

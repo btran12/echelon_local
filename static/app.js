@@ -1276,9 +1276,13 @@
         const data = await api('/scan', 'POST');
         const select = $('#deviceSelect');
         select.innerHTML = '';
-        if (!data.devices || !data.devices.length) {
+        if (data.timed_out) {
+          select.innerHTML = '<option value="">No answer from the bike agent</option>';
+          showToast('No answer from the bike agent. Start it on the bike machine, then scan again.', 'error');
+          addEvent({ level: 'error', message: 'Scan timed out: the bike agent did not respond. Start aws_agent.py on the bike machine.', timestamp: new Date().toISOString() });
+        } else if (!data.devices || !data.devices.length) {
           select.innerHTML = '<option value="">No likely Echelon devices found</option>';
-          showToast('No Echelon bikes found. Power-cycle the bike and try again.', 'error');
+          showToast('The agent scanned but found no Echelon bike. Wake the bike (pedal a few turns) and scan again.', 'error');
         } else {
           data.devices.forEach((device) => {
             const option = document.createElement('option');

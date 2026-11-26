@@ -163,7 +163,8 @@
         return jsonResponse({ devices: result.devices || [] });
       }
     }
-    return jsonResponse({ devices: [] });
+    // No agent picked the command up: an empty list here would be misleading.
+    return jsonResponse({ devices: [], timed_out: true });
   }
 
   async function runConnect(init) {
