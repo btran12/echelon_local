@@ -26,6 +26,10 @@
   window.__ECHELON_CLOUD__ = true;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // One status poll per second is the freshest the dashboard can get from a
+  // queued-command API; schedule it at a fixed cadence so round trips do not
+  // stretch the interval.
+  const POLL_INTERVAL_MS = 1000;
 
   function jsonResponse(data, status) {
     return new Response(JSON.stringify(data), {
@@ -354,15 +358,18 @@
         this.timer = setTimeout(() => this.loop(), 3000);
         return;
       }
+      const startedAt = Date.now();
       this.ticks += 1;
       try {
         await this.pollStatus();
-        if (this.ticks % 4 === 0) await this.pollEvents();
-        if (this.ticks % 5 === 0) await this.pollActive();
       } catch (error) {
         console.warn('Polling failed', error);
       }
-      this.timer = setTimeout(() => this.loop(), 1000);
+      // Side polls run in the background so they never stretch the telemetry cadence.
+      if (this.ticks % 4 === 0) this.pollEvents();
+      if (this.ticks % 5 === 0) this.pollActive();
+      const elapsed = Date.now() - startedAt;
+      this.timer = setTimeout(() => this.loop(), Math.max(200, POLL_INTERVAL_MS - elapsed));
     }
   }
 

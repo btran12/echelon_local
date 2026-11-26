@@ -67,6 +67,7 @@ class AwsAgent:
         self.last_sync = 0.0
         self.last_active_post = 0.0
         self.last_active_marker: str | None = None
+        self.published_workout = False
         self.running = True
 
     def _headers(self) -> dict[str, str]:
@@ -120,13 +121,24 @@ class AwsAgent:
         send_active = snapshot is not None and (
             marker != self.last_active_marker or now - self.last_active_post >= ACTIVE_SNAPSHOT_SECONDS
         )
+        # Tell the API once when a tracked session ends so the stored snapshot
+        # does not linger and leave the dashboard on "Stop workout".
+        ended = snapshot is None and self.published_workout
 
-        if encoded == self.last_core and not new_events and not send_active and now - self.last_post < 30:
+        if (
+            encoded == self.last_core
+            and not new_events
+            and not send_active
+            and not ended
+            and now - self.last_post < 30
+        ):
             return
 
         payload: dict[str, Any] = {**core, "events": new_events}
         if send_active:
             payload["workout"] = snapshot
+        elif ended:
+            payload["workout"] = None
         await self._request("POST", "/telemetry", payload)
         for event in new_events:
             self.seen_events.append(f"{event.get('timestamp')}|{event.get('message')}")
@@ -134,6 +146,7 @@ class AwsAgent:
             self.seen_events = self.seen_events[-500:]
         self.last_core = encoded
         self.last_post = now
+        self.published_workout = send_active
         if send_active:
             self.last_active_post = now
             self.last_active_marker = marker

@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import time
 import unittest
 from pathlib import Path
 
@@ -143,6 +144,79 @@ class AwsHandlerTests(unittest.TestCase):
 
         active = decode(self.call("GET", "/workouts/active"))
         self.assertTrue(active["active"])
+
+    def test_telemetry_without_workout_keeps_active_snapshot(self):
+        self.call("POST", "/telemetry", {
+            "status": {"state": "streaming", "connected": True},
+            "telemetry": {"cadence_rpm": 80, "timestamp": "2026-11-24T12:00:00+00:00"},
+            "workout": {"id": "42", "sample_count": 3, "samples": []},
+        })
+        self.assertTrue(decode(self.call("GET", "/workouts/active"))["active"])
+
+        # Routine posts omit "workout"; that must not wipe the stored snapshot.
+        self.call("POST", "/telemetry", {
+            "status": {"state": "streaming", "connected": True},
+            "telemetry": {"cadence_rpm": 81, "timestamp": "2026-11-24T12:00:01+00:00"},
+        })
+        active = decode(self.call("GET", "/workouts/active"))
+        self.assertTrue(active["active"])
+        self.assertEqual(active["workout"]["id"], "42")
+        self.assertEqual(decode(self.call("GET", "/status"))["workout"]["id"], "42")
+
+        # An explicit null ends the session.
+        self.call("POST", "/telemetry", {
+            "status": {"state": "streaming", "connected": True},
+            "telemetry": {"cadence_rpm": 0, "timestamp": "2026-11-24T12:00:02+00:00"},
+            "workout": None,
+        })
+        self.assertFalse(decode(self.call("GET", "/workouts/active"))["active"])
+        self.assertIsNone(decode(self.call("GET", "/status"))["workout"])
+
+    def test_telemetry_update_expression_has_no_unused_names(self):
+        module = load_handler()
+        captured = {}
+        original = module.TABLE.update_item
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        module.TABLE.update_item = spy
+        try:
+            module.handler(api_event("POST", "/telemetry", {
+                "status": {"state": "streaming", "connected": True},
+                "telemetry": {"cadence_rpm": 80},
+            }), None)
+        finally:
+            module.TABLE.update_item = original
+
+        expression = captured["UpdateExpression"]
+        unused = [key for key in captured["ExpressionAttributeNames"] if key not in expression]
+        self.assertEqual(unused, [], f"unused attribute names in {expression}")
+
+    def test_stale_active_snapshot_is_ignored(self):
+        now = int(time.time())
+        self.client.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "pk": {"S": "STATE"},
+                "sk": {"S": "LATEST"},
+                "status": {"M": {"state": {"S": "streaming"}, "connected": {"BOOL": True}}},
+                "telemetry": {"M": {}},
+                "workout": {"M": {"id": {"S": "stale"}, "sample_count": {"N": "1"}}},
+                "updated_at": {"N": str(now - 600)},
+            },
+        )
+        self.assertFalse(decode(self.call("GET", "/workouts/active"))["active"])
+        self.assertIsNone(decode(self.call("GET", "/status"))["workout"])
+
+        self.client.update_item(
+            TableName=TABLE_NAME,
+            Key={"pk": {"S": "STATE"}, "sk": {"S": "LATEST"}},
+            UpdateExpression="SET updated_at = :now",
+            ExpressionAttributeValues={":now": {"N": str(now)}},
+        )
+        self.assertTrue(decode(self.call("GET", "/workouts/active"))["active"])
 
     def test_workout_upload_list_read_delete(self):
         first = workout_payload("0000000000001-00001", "2026-11-20T07:00:00+00:00")

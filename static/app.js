@@ -191,6 +191,48 @@
     });
   }
 
+  // Numbers ease to their new value instead of snapping, so a 1 Hz telemetry
+  // feed reads as a moving instrument rather than a slot machine.
+  const NUMBER_TWEEN_MS = 420;
+  const numberTweens = new Map();
+
+  function reducedMotion() {
+    return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+
+  function setMetricNumber(element, value, digits = 0) {
+    if (!element) return;
+    const numeric = value === null || value === undefined ? NaN : Number(value);
+    const label = Number.isFinite(numeric) ? fmtNumber(numeric, digits) : '—';
+    const running = numberTweens.get(element);
+    if (running) cancelAnimationFrame(running.raf);
+
+    const from = running && Number.isFinite(running.current)
+      ? running.current
+      : Number(element.dataset.value);
+    element.dataset.value = Number.isFinite(numeric) ? String(numeric) : '';
+
+    if (!Number.isFinite(numeric) || !Number.isFinite(from) || from === numeric || reducedMotion()) {
+      numberTweens.delete(element);
+      element.textContent = label;
+      return;
+    }
+
+    const startedAt = performance.now();
+    const step = (timestamp) => {
+      const progress = Math.min(1, (timestamp - startedAt) / NUMBER_TWEEN_MS);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const current = from + (numeric - from) * eased;
+      element.textContent = fmtNumber(current, digits);
+      if (progress < 1) numberTweens.set(element, { raf: requestAnimationFrame(step), current });
+      else {
+        numberTweens.delete(element);
+        element.textContent = label;
+      }
+    };
+    numberTweens.set(element, { raf: requestAnimationFrame(step), current: from });
+  }
+
   function fmtDuration(seconds, compact = false) {
     seconds = Math.max(0, Math.round(Number(seconds) || 0));
     const hours = Math.floor(seconds / 3600);
@@ -734,11 +776,11 @@
     $('#speedUnit').textContent = speedUnit();
     $('#distanceUnit').textContent = distanceUnit();
 
-    $('#cadenceValue').textContent = cadence === null || cadence === undefined ? '—' : fmtNumber(cadence, 0);
-    $('#resistanceValue').textContent = resistance === null || resistance === undefined ? '—' : fmtNumber(resistance, 0);
-    $('#speedValue').textContent = speed === null || speed === undefined ? '—' : fmtNumber(convertSpeed(speed), 1);
-    $('#distanceValue').textContent = distance === null || distance === undefined ? '—' : fmtNumber(convertDistance(distance), 2);
-    $('#powerValue').textContent = power === null || power === undefined ? '—' : fmtNumber(power, 0);
+    setMetricNumber($('#cadenceValue'), cadence, 0);
+    setMetricNumber($('#resistanceValue'), resistance, 0);
+    setMetricNumber($('#speedValue'), speed === null || speed === undefined ? null : convertSpeed(speed), 1);
+    setMetricNumber($('#distanceValue'), distance === null || distance === undefined ? null : convertDistance(distance), 2);
+    setMetricNumber($('#powerValue'), power, 0);
     $('#elapsedValue').textContent = elapsed === null || elapsed === undefined
       ? '—'
       : fmtDuration(elapsed);
@@ -758,7 +800,7 @@
       $('#liveTracked').textContent = fmtDuration(elapsedSeconds);
       $('#elapsedValue').textContent = fmtDuration(elapsedSeconds);
       $('#distanceSub').textContent = 'tracked session';
-      $('#distanceValue').textContent = fmtNumber(convertDistance(active.distance_km), 2);
+      setMetricNumber($('#distanceValue'), convertDistance(active.distance_km), 2);
     } else {
       $('#liveTracked').textContent = '—';
     }
@@ -778,11 +820,11 @@
     const distance = active ? active.distance_km : telemetry?.distance_km;
 
     $('#rideClock').textContent = live(elapsed) ? '0:00' : fmtDuration(elapsed);
-    $('#ridePower').textContent = live(power) ? '—' : fmtNumber(power, 0);
-    $('#rideCadence').textContent = live(cadence) ? '—' : fmtNumber(cadence, 0);
-    $('#rideResistance').textContent = live(resistance) ? '—' : fmtNumber(resistance, 0);
-    $('#rideSpeed').textContent = live(speed) ? '—' : fmtNumber(convertSpeed(speed), 1);
-    $('#rideDistance').textContent = live(distance) ? '—' : fmtNumber(convertDistance(distance), 2);
+    setMetricNumber($('#ridePower'), power, 0);
+    setMetricNumber($('#rideCadence'), cadence, 0);
+    setMetricNumber($('#rideResistance'), resistance, 0);
+    setMetricNumber($('#rideSpeed'), speed === null || speed === undefined ? null : convertSpeed(speed), 1);
+    setMetricNumber($('#rideDistance'), distance === null || distance === undefined ? null : convertDistance(distance), 2);
     $('#rideSpeedUnit').textContent = speedUnit();
     $('#rideDistanceUnit').textContent = distanceUnit();
 

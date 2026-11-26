@@ -161,6 +161,9 @@ Resources:
           SAMPLES_PK = "WORKOUT#SAMPLES"
           SAMPLE_CHUNK = 400
           MAX_WORKOUTS = 5000
+          # An active-session snapshot older than this is treated as stale (the agent
+          # stopped mid-ride) instead of a live workout.
+          ACTIVE_WORKOUT_STALE_SECONDS = 180
           ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
           SUMMARY_FIELDS = (
               "id", "started_at", "ended_at", "date", "duration_seconds", "distance_km",
@@ -326,15 +329,37 @@ Resources:
           # ----------------------------------------------------------------- telemetry
           def _store_telemetry(body):
               now = _now()
-              TABLE.put_item(
-                  Item=_decimal({
-                      "pk": "STATE",
-                      "sk": "LATEST",
-                      "status": body.get("status") or {},
-                      "telemetry": body.get("telemetry") or {},
-                      "workout": body.get("workout"),
-                      "updated_at": now,
-                  })
+              # Only touch the fields this post carries: the agent sends "workout" when it
+              # has a new snapshot (or an explicit null when the session ends), and every
+              # other post must leave the stored one alone.
+              sets = ["#status = :status", "#telemetry = :telemetry", "#updated = :updated"]
+              removes = []
+              names = {
+                  "#status": "status",
+                  "#telemetry": "telemetry",
+                  "#updated": "updated_at",
+              }
+              values = {
+                  ":status": _decimal(body.get("status") or {}),
+                  ":telemetry": _decimal(body.get("telemetry") or {}),
+                  ":updated": now,
+              }
+              if "workout" in body:
+                  names["#workout"] = "workout"
+                  if body.get("workout") is None:
+                      removes.append("#workout")
+                  else:
+                      sets.append("#workout = :workout")
+                      values[":workout"] = _decimal(body["workout"])
+
+              expression = "SET " + ", ".join(sets)
+              if removes:
+                  expression += " REMOVE " + ", ".join(removes)
+              TABLE.update_item(
+                  Key={"pk": "STATE", "sk": "LATEST"},
+                  UpdateExpression=expression,
+                  ExpressionAttributeNames=names,
+                  ExpressionAttributeValues=values,
               )
 
               events = body.get("events") or []
@@ -360,8 +385,18 @@ Resources:
               status.setdefault("state", "disconnected")
               status.setdefault("connected", False)
               status["latest"] = _plain(item.get("telemetry") or {})
-              status["workout"] = _plain(item.get("workout")) if item.get("workout") is not None else None
-              status["updated_at"] = _plain(item.get("updated_at"))
+              workout = _plain(item.get("workout")) if item.get("workout") is not None else None
+              updated_at = _plain(item.get("updated_at"))
+              # A snapshot left behind by an agent that stopped mid-session must not read
+              # as a live workout, so both /status and /workouts/active apply the same rule.
+              if (
+                  workout is not None
+                  and isinstance(updated_at, (int, float))
+                  and _now() - float(updated_at) > ACTIVE_WORKOUT_STALE_SECONDS
+              ):
+                  workout = None
+              status["workout"] = workout
+              status["updated_at"] = updated_at
               return status
 
 
